@@ -1,0 +1,130 @@
+name: Build and release ROM
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish GitHub Release (disable for build-only validation)
+        type: boolean
+        required: true
+        default: true
+
+env:
+  ROM_PREFIX: PokemonKrystal
+
+jobs:
+  fetch-build-info:
+    name: Fetch build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release-tag: ${{ steps.meta.outputs.release-tag }}
+      short-sha: ${{ steps.meta.outputs.short-sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate version tag
+        id: meta
+        shell: bash
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE_TAG=$(date +'%Y.%m.%d')
+          echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "release-tag=v$DATE_TAG-$SHORT_SHA" >> $GITHUB_OUTPUT
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: fetch-build-info
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.fetch-build-info.outputs.release-tag }}
+          body: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}
+          skipIfReleaseExists: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-rom:
+    name: Build ROM
+    needs: [fetch-build-info, create-release]
+    if: >-
+      ${{ !cancelled() && needs.fetch-build-info.result == 'success' &&
+          (needs.create-release.result == 'success' ||
+           (github.event_name == 'workflow_dispatch' && !inputs.publish &&
+            needs.create-release.result == 'skipped')) }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential binutils-arm-none-eabi gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi libpng-dev zlib1g-dev wget unzip
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Poryscript
+        shell: bash
+        run: |
+          wget -q https://github.com/huderlem/poryscript/releases/latest/download/poryscript-linux-x86_64.zip
+          unzip -q poryscript-linux-x86_64.zip -d /tmp/poryscript
+          sudo mv /tmp/poryscript/poryscript /usr/local/bin/
+          sudo chmod +x /usr/local/bin/poryscript
+
+      - name: Install agbcc
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/pret/agbcc.git /tmp/agbcc
+          cd /tmp/agbcc
+          ./build.sh
+          ./install.sh "$GITHUB_WORKSPACE"
+
+      - name: Compile Tools and ROM
+        shell: bash
+        run: |
+          export DEVKITARM=/usr
+          make tools -j$(nproc)
+          make -j$(nproc)
+
+      - name: Verify and Package ROM
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}.zip
+        run: |
+          ROM_FILE=$(find . -maxdepth 1 -name "*.gba" | head -n 1)
+          if [[ -z "$ROM_FILE" || ! -f "$ROM_FILE" ]]; then
+            echo "No compiled .gba file found in workspace root" >&2
+            exit 1
+          fi
+          mv "$ROM_FILE" "${{ env.ROM_PREFIX }}.gba"
+          zip -9 "$ARCHIVE_NAME" "${{ env.ROM_PREFIX }}.gba"
+
+      - name: Upload validation artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}-attempt${{ github.run_attempt }}
+          path: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload release
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}.zip
+          asset_name: ${{ env.ROM_PREFIX }}-${{ needs.fetch-build-info.outputs.release-tag }}.zip
+          tag: ${{ needs.fetch-build-info.outputs.release-tag }}
+          overwrite: true
