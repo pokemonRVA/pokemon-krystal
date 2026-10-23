@@ -3,7 +3,6 @@ name: Build and release ROM
 on:
   push:
     branches:
-      - main
       - master
   workflow_dispatch:
     inputs:
@@ -67,35 +66,16 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            build-essential binutils-arm-none-eabi gcc-arm-none-eabi \
-            libnewlib-arm-none-eabi libpng-dev zlib1g-dev wget unzip
+            sudo apt install build-essential binutils-arm-none-eabi \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi git libpng-dev python3
 
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install Poryscript
-        shell: bash
-        run: |
-          wget -q https://github.com/huderlem/poryscript/releases/latest/download/poryscript-linux-x86_64.zip
-          unzip -q poryscript-linux-x86_64.zip -d /tmp/poryscript
-          sudo mv /tmp/poryscript/poryscript /usr/local/bin/
-          sudo chmod +x /usr/local/bin/poryscript
-
-      - name: Install agbcc
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/pret/agbcc.git /tmp/agbcc
-          cd /tmp/agbcc
-          ./build.sh
-          ./install.sh "$GITHUB_WORKSPACE"
-
       - name: Compile Tools and ROM
         shell: bash
-        run: |
-          export DEVKITARM=/usr
-          make tools -j$(nproc)
-          make -j$(nproc)
+        run: make -j$(nproc)
 
       - name: Verify and Package ROM
         shell: bash
